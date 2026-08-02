@@ -51,7 +51,7 @@ python st.py Hello, how are you? ru
 **Requirements:** Python 3.8+
 
 ```bash
-git clone https://github.com/<your-username>/sonictranslator.git
+git clone https://github.com/Tool-xx/sonictranslator.git
 cd sonictranslator
 
 pip install playwright pyperclip
