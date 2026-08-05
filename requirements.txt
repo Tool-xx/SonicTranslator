@@ -1,0 +1,14 @@
+# SonicTranslator — Python dependencies
+#
+# Install everything:
+#   pip install -r requirements.txt
+#   python -m playwright install chromium
+#
+# Runtime notes:
+#   - st.py (CLI) requires: playwright, pyperclip
+#   - stgui.py (GUI) requires: playwright, customtkinter
+#   - Browsers are downloaded separately by `python -m playwright install`.
+
+playwright>=1.44.0
+pyperclip>=1.8.2
+customtkinter>=5.2.0
