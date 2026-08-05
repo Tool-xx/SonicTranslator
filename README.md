@@ -1,219 +1,136 @@
-<div align="center">
+# SonicTranslator
 
-# ⚡ SonicTranslator
+AI-powered translator for your terminal and desktop. No API keys, no accounts, no quotas —
+the text is translated through Duck.ai in a real (invisible) browser window.
 
-**Free, unlimited, AI-quality translation — straight from your terminal.**
+`st.py` is a one-shot CLI built for integration: single stdout line, stderr for errors,
+exit codes for control flow. `stgui.py` is a dark, distraction-free desktop GUI with a
+persistent browser session.
 
-No API keys. No monthly quotas. No signup forms.
-Just Python, a hidden browser, and DuckDuckGo's free AI chat doing the heavy lifting.
-
-[Features](#-features) •
-[Installation](#-installation) •
-[Usage](#-usage) •
-[How it works](#%EF%B8%8F-how-it-works) •
-[Troubleshooting](#-troubleshooting) •
-[FAQ](#-faq)
-
-</div>
+> ⚠️ **Heads-up:** this automates a third-party chat UI. It can break when Duck.ai changes
+> its layout, and it is subject to their Terms of Service. See [Limitations](#limitations).
 
 ---
 
-## What is this?
+## Features
 
-SonicTranslator is a command-line tool that translates text using an AI model — for free — by driving a real (but invisible) browser session against [Duck.ai](https://duck.ai), DuckDuckGo's free AI chat product. No API key, no OpenAI/Google Cloud billing account, no rate-limited free tier that runs out on day two.
+- **20 target languages**, source language auto-detected
+- **Integration-friendly CLI** — machine-readable stdout contract, exit codes
+- **Desktop GUI** — dark theme, Copy / Clear, `Ctrl+Enter` to translate
+- **Idiom-aware prompt** — tone, slang and technical terms are preserved
+- **Clipboard** — result copied automatically
+- **Debug dumps** — screenshot + page HTML on failure
 
-Feed it a sentence or a whole text file, tell it which language you want, and the translation lands directly in your clipboard — ready to paste anywhere.
+## Quick start
+
+Requires **Python 3.8+** and a [Playwright](https://playwright.dev/python/) Chromium build.
 
 ```bash
-python st.py Hello, how are you? ru
-# → Привет, как дела? is now on your clipboard
+git clone https://github.com/Tool-xx/SonicTranslator.git
+cd SonicTranslator
+
+pip install -r requirements.txt
+python -m playwright install chromium
 ```
 
----
+First run launches a hidden Chrome window that downloads nothing and needs no login.
 
-## ✨ Features
-
-| | |
-|---|---|
-| 🧠 **AI-quality translations** | Powered by an LLM, not a phrase-lookup table — it understands tone, slang, and context. |
-| 🌍 **Auto language detection** | You never specify the source language. Just say where you want it translated *to*. |
-| 📋 **Clipboard-first** | No cluttered terminal output. One clean confirmation line, and the result is ready to paste. |
-| 📄 **File input support** | Translate an entire `.txt` file with one flag. |
-| 🔑 **Zero API keys** | Nothing to sign up for, nothing to pay for, nothing to expire. |
-| 🕵️ **Stealth browser session** | Persistent, fingerprint-hardened Chromium context designed to blend in as an ordinary desktop browser. |
-| 🧩 **Script-friendly** | Clean exit codes and stderr-only errors make it trivial to call from other tools and pipelines. |
-| 🎞️ **Minimal live feedback** | A lightweight spinner animation while translation is in progress — no dead silence, no noisy logs. |
-
----
-
-## 📦 Installation
-
-**Requirements:** Python 3.8+
+## CLI
 
 ```bash
-git clone https://github.com/Tool-xx/sonictranslator.git
-cd sonictranslator
+# translate inline text
+python st.py "Hello, how are you?" ru
 
-pip install playwright pyperclip
-playwright install chromium
-```
-
-That's it — no `.env` file, no config, no API key to paste anywhere.
-
-> **Linux users:** if the clipboard doesn't work out of the box, install `xclip` or `xsel`:
-> ```bash
-> sudo apt install xclip
-> ```
-
----
-
-## 🚀 Usage
-
-### Basic translation
-
-```bash
-python st.py <text to translate> <target language code>
-```
-
-```bash
-python st.py Hello, how are you? ru
-python st.py "Bonjour tout le monde" en
-python st.py Привет мир en
-```
-
-Quotes are optional — SonicTranslator treats everything except the last argument as the text to translate.
-
-### Translate a file
-
-Prefix the file path with `-`:
-
-```bash
+# translate a file (prefix path with "-")
 python st.py -notes.txt en
-```
 
-The file just needs to be plain text (UTF-8, with automatic fallback to Windows‑1251 for legacy files).
-
-### Built-in help
-
-```bash
-python st.py
-# or
+# help / list of language codes
 python st.py --help
 ```
 
-Prints the full usage guide along with the complete language table.
+### Integration contract
 
-### On success
+| Condition                        | stdout                                              | stderr        | exit code |
+|----------------------------------|-----------------------------------------------------|---------------|-----------|
+| No arguments, `-h` / `--help`    | usage guide                                         | —             | `0`       |
+| Success                          | `Everything has been translated and copied to the clipboard` | —      | `0`       |
+| Too few arguments (one token)    | —                                                   | error message | `1`       |
+| Unknown language                 | —                                                   | error message | `1`       |
+| Translation failure              | —                                                   | error message | `1`       |
 
-Exactly one line is printed, and the translation is already on your clipboard:
+The exact text is printed to **stdout only on success** — check the return code, not the output.
 
-```
-Everything has been translated and copied to the clipboard
-```
-
-### On failure
-
-An error is printed to **stderr** and the process exits with a non-zero status — so scripts and other software can check `returncode` instead of parsing stdout.
-
----
-
-## 🌐 Supported languages
-
-| Code | Language | | Code | Language | | Code | Language |
-|---|---|---|---|---|---|---|---|
-| `en` | English | | `hi` | Hindi | | `sv` | Swedish |
-| `es` | Spanish | | `tr` | Turkish | | `vi` | Vietnamese |
-| `fr` | French | | `nl` | Dutch | | `th` | Thai |
-| `de` | German | | `pl` | Polish | | `id` | Indonesian |
-| `zh` | Chinese | | `ru` | Russian | | `uk` | Ukrainian |
-| `ja` | Japanese | | `pt` | Portuguese | | `ar` | Arabic |
-| `ko` | Korean | | `it` | Italian | | | |
-
-You only ever pass the **target** code — the source language is detected automatically.
-
----
-
-## ⚙️ How it works
-
-SonicTranslator doesn't call a translation API. It automates a real browser session against Duck.ai's free AI chat and asks the model to translate for you.
+### Language codes
 
 ```
-your text  →  Playwright-controlled Chromium  →  duck.ai chat  →  AI response  →  cleaned & copied
+ar Arabic     de German     en English    es Spanish    fr French
+hi Hindi      id Indonesian it Italian    ja Japanese   ko Korean
+nl Dutch      pl Polish     pt Portuguese ru Russian    sv Swedish
+th Thai       tr Turkish    uk Ukrainian  vi Vietnamese zh Chinese
 ```
 
-A few deliberate design choices worth knowing about:
-
-- **The browser window is real, not headless.** Headless Chromium is trivially detected by most anti-bot systems, so SonicTranslator launches an ordinary visible browser context — it's just moved off-screen (`window-position: -10000,-10000`) so it never appears on your desktop.
-- **Session persistence.** A dedicated Chromium profile is kept under `~/.sonic_translator/`, so cookies and session state carry over between runs instead of starting from scratch every time.
-- **Response stabilization.** Rather than guessing a fixed wait time, SonicTranslator polls the AI's response and waits for the text to stop changing before treating it as final — output is only returned once it's actually done streaming.
-- **Automatic output cleanup.** UI artifacts that sometimes leak into the raw response (model name badges, "Send" labels, cookie-banner text, etc.) are filtered out before the result ever reaches your clipboard.
-
----
-
-## 🛠️ Troubleshooting
-
-<details>
-<summary><strong>"Duck.ai did not respond within 30s"</strong></summary>
-
-<br>
-
-This usually means Duck.ai's anti-bot layer flagged the session, or the page layout changed. SonicTranslator automatically saves two debug files next to the script when this happens:
-
-- `debug_screenshot.png` — a full-page screenshot at the moment of failure
-- `debug_page.html` — the raw page HTML at that moment
-
-Check the screenshot first — it's almost always a cookie banner, a CAPTCHA, or a UI change that needs a selector update.
-</details>
-
-<details>
-<summary><strong>Nothing gets copied to my clipboard</strong></summary>
-
-<br>
-
-On Linux, make sure `xclip` or `xsel` is installed (`pyperclip` needs one of them to talk to the system clipboard). On Windows and macOS this should work out of the box.
-</details>
-
-<details>
-<summary><strong>It's slow on the first run</strong></summary>
-
-<br>
-
-The very first launch has to spin up a fresh Chromium profile and load duck.ai from scratch. Subsequent runs reuse the same profile directory and are noticeably faster.
-</details>
-
-<details>
-<summary><strong>Missing dependency errors</strong></summary>
-
-<br>
+## GUI
 
 ```bash
-pip install playwright pyperclip
-playwright install chromium
+python stgui.py
 ```
 
-If you see `Error: missing dependency 'pyperclip'`, it means the package installed above isn't visible to the Python interpreter you're running the script with — double check you're using the same environment.
-</details>
+Type or paste text, pick a target language, hit **Translate** (or `Ctrl+Enter`).
+The GUI keeps one browser open between requests, so consecutive translations are fast.
+
+## How it works
+
+```
+┌──────────┐     ┌──────────────────────────────┐
+│  st.py   │     │          st_core.py          │
+│  CLI     │────▶│  languages · prompt · clean  │──▶ Duck.ai (browser)
+│ stgui.py │     │  browser config · timings    │
+│  GUI     │     └──────────────────────────────┘
+```
+
+| File               | Role                                                                 |
+|--------------------|----------------------------------------------------------------------|
+| `st_core.py`       | Shared core: language tables, prompt builder, response cleaning, browser launch config, page helpers |
+| `st.py`            | CLI entry point — single-shot translate, spinner, clipboard copy     |
+| `stgui.py`         | GUI entry point — worker thread + persistent browser, request queue  |
+
+The browser runs in a real window positioned off-screen (`-10000,-10000`) — invisible to
+you, but far less detectable as automation than headless mode. The persistent profile
+lives in `~/.sonic_translator/browser_data`.
+
+## Configuration
+
+All timing knobs live in `st_core.py`:
+
+| Constant                    | Default | Meaning                                |
+|-----------------------------|---------|----------------------------------------|
+| `GOTO_TIMEOUT_MS`           | 45000   | page load timeout                      |
+| `COMPOSER_WAIT_MS`          | 15000   | wait for the input box                 |
+| `SUBMIT_WAIT_MS`            | 5000    | wait for the submit button             |
+| `RESPONSE_TIMEOUT_MS`       | 30000   | wait for the response element          |
+| `STABILITY_POLL_MS`         | 500     | poll interval while the answer streams |
+| `STABILITY_TICKS_REQUIRED`  | 2       | identical reads before accepting       |
+| `MAX_STABILITY_POLLS`       | 90      | hard cap on the polling loop           |
+
+## Troubleshooting
+
+On failure the app saves two files next to the script:
+
+- `debug_screenshot.png` — what the page looked like
+- `debug_page.html` — the raw page markup
+
+Common causes: Duck.ai layout change, captcha, network block. Check the dump, then re-run.
+If translation quality degrades (artifacts like model labels leaking through), the artifact
+patterns live in `st_core._ARTIFACT_PATTERNS`.
+
+## Limitations
+
+- **Third-party dependency** — the whole pipeline depends on Duck.ai's DOM and availability.
+- **ToS risk** — automating the site may violate their terms; use at your own risk.
+- **Privacy** — your text is sent to Duck.ai. Do not translate sensitive data.
+- **Single browser profile** — CLI and GUI share `~/.sonic_translator/browser_data`;
+  running both at the same time can collide on the profile lock.
 
 ---
 
-## ❓ FAQ
-
-**Is this against Duck.ai's terms of service?**
-This tool automates a browser to interact with Duck.ai's public web chat rather than calling an official API. Duck.ai's terms may not permit automated use — this project is provided for educational purposes, and you're responsible for how you use it.
-
-**Will this always work?**
-It depends on Duck.ai's front-end staying reasonably stable and their anti-bot detection not tightening further. This is an inherent trade-off of any tool built on browser automation against a UI that isn't a stable, versioned API. If you need guaranteed uptime, an official paid translation API is the safer long-term choice.
-
-**Can I use this in my own project?**
-Yes — SonicTranslator is a plain CLI. Call it as a subprocess from any language, check the exit code, and read whatever you need from the clipboard or by wiring in your own output handling.
-
-**Why not use Google Translate's API directly?**
-Google's official Cloud Translation API requires billing setup and charges per character past a small free tier. SonicTranslator exists specifically for people who want zero-cost, zero-key translation without those constraints — with the trade-off of being slower and less guaranteed than a paid API.
-
----
-
-<div align="center">
-
-Made for people who are tired of API keys.
-
-</div>
+[SonicTranslator](https://github.com/Tool-xx/SonicTranslator) · built with Python, Playwright, customtkinter
