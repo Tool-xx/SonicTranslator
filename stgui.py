@@ -7,16 +7,53 @@ Powered by Duck.ai via Playwright
 A clean, dark, distraction-free translator window: type or paste text,
 pick a target language, hit Translate. Source language is detected
 automatically. No accounts, no API keys, no clutter.
+
+Shared logic (languages, prompts, response cleaning, browser config) lives
+in st_core.py so the CLI and GUI can never drift apart.
 """
 
 import os
-import re
 import sys
 import threading
 import queue
 
-import customtkinter as ctk
-from playwright.sync_api import sync_playwright
+try:
+    import customtkinter as ctk
+except ImportError:
+    print(
+        "Error: missing dependency 'customtkinter'. "
+        "Install with: pip install customtkinter",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    print(
+        "Error: missing dependency 'playwright'. Install with:\n"
+        "    pip install playwright\n"
+        "    python -m playwright install chromium",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+from st_core import (
+    LANG_NAMES_SORTED,
+    build_prompt,
+    clean_translation,
+    clear_chat,
+    dismiss_banners,
+    dump_debug_info,
+    fill_and_submit,
+    get_browser_kwargs,
+    get_stealth_init_script,
+    get_user_data_dir,
+    wait_for_response,
+    DUCK_AI_URL,
+    GOTO_TIMEOUT_MS,
+    INITIAL_SETTLE_MS,
+)
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  THEME — grayscale + a single muted accent, generous spacing, flat surfaces
@@ -39,202 +76,94 @@ COLOR = {
 
 FONT_FAMILY = "Segoe UI" if sys.platform.startswith("win") else "Helvetica"
 
-LANG_CODES = {
-    "en": "English", "es": "Spanish", "fr": "French", "de": "German",
-    "zh": "Chinese", "ja": "Japanese", "ko": "Korean", "ru": "Russian",
-    "pt": "Portuguese", "it": "Italian", "ar": "Arabic", "hi": "Hindi",
-    "tr": "Turkish", "nl": "Dutch", "pl": "Polish", "sv": "Swedish",
-    "vi": "Vietnamese", "th": "Thai", "id": "Indonesian", "uk": "Ukrainian",
-}
-NAME_TO_CODE = {name: code for code, name in LANG_CODES.items()}
-LANG_NAMES_SORTED = sorted(LANG_CODES.values())
-
-_ARTIFACT_PATTERNS = [
-    re.compile(r"^GPT-\d+(\.\d+)?\s*nano\s*$", re.IGNORECASE),
-    re.compile(r"^\s*Private\s*$", re.IGNORECASE),
-    re.compile(r"^\s*\u00b7\s*$"),
-    re.compile(r"^\s*Send\s*$", re.IGNORECASE),
-    re.compile(r"^\s*Switch model\s*$", re.IGNORECASE),
-    re.compile(r"^\s*Search the web\s*$", re.IGNORECASE),
-    re.compile(r"^\s*Positive feedback\s*$", re.IGNORECASE),
-    re.compile(r"^\s*Negative feedback\s*$", re.IGNORECASE),
-    re.compile(r"^\s*Ask anything privately\s*$", re.IGNORECASE),
-    re.compile(r"^\s*Duck\.ai is temporarily unavailable\s*$", re.IGNORECASE),
-    re.compile(r"^\s*Continuer\s*$", re.IGNORECASE),
-    re.compile(r"^\s*Continue\s*$", re.IGNORECASE),
-    re.compile(r"^\s*New Chat\s*$", re.IGNORECASE),
-    re.compile(r"^\s*Clear conversation\s*$", re.IGNORECASE),
-]
-
-
-def clean_translation(raw: str, original: str) -> str:
-    if not raw:
-        return ""
-    cleaned = []
-    for line in raw.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if any(p.search(stripped) for p in _ARTIFACT_PATTERNS):
-            continue
-        if stripped.lower() == original.strip().lower():
-            continue
-        cleaned.append(stripped)
-    text = "\n".join(cleaned)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r" {2,}", " ", text)
-    text = text.strip()
-
-    orig_stripped = original.strip().lower()
-    if orig_stripped and orig_stripped in text.lower():
-        idx = text.lower().find(orig_stripped)
-        after = text[idx + len(original.strip()):].strip()
-        if after:
-            text = after
-    return text
-
-
-def build_prompt(text: str, target_lang: str) -> str:
-    return (
-        f"You are an expert translator with 20 years of experience in software localization. "
-        f"Your native language is {target_lang}. You specialize in preserving nuance, "
-        f"idioms, sarcasm, technical terminology, and cultural context.\n\n"
-        f"TASK: Detect the source language of the text below automatically, then translate "
-        f"it into {target_lang}.\n\n"
-        f"MANDATORY RULES — follow strictly:\n\n"
-        f"1. IDIOMS & METAPHORS: Never translate idioms word-for-word. Use an equivalent "
-        f"{target_lang} idiom with the SAME meaning and tone, or translate the meaning "
-        f"naturally if no equivalent exists.\n\n"
-        f"2. TECHNICAL TERMS: Use ONLY standard, industry-accepted terminology in "
-        f"{target_lang}. Do not invent new terms; keep acronyms like CI/CD or API as-is.\n\n"
-        f"3. PROPER NOUNS: Never translate brand names, product names, platforms, or "
-        f"programming languages.\n\n"
-        f"4. TONE & REGISTER: Preserve the original tone exactly — sarcastic, informal, "
-        f"or vulgar stays that way. Do not sanitize or add politeness that wasn't there.\n\n"
-        f"5. SLANG: Translate slang into natural {target_lang} slang of the same intensity.\n\n"
-        f"6. OUTPUT FORMAT: Reply with ONLY the translated text. NO headers, NO markdown, "
-        f"NO explanations, NO notes about the detected language, NO repetition of the "
-        f"source text, NO 'Here is the translation:' prefixes, NO model names.\n\n"
-        f"7. ACCURACY CHECK before answering: no untranslated source words remain (except "
-        f"proper nouns), no idiom was translated word-for-word, no term was invented, tone "
-        f"matches the original.\n\n"
-        f"TEXT TO TRANSLATE:\n\n{text}"
-    )
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  TRANSLATION WORKER — one persistent hidden browser, serialized requests
+#  Results are pushed onto a queue that the GUI polls from the main thread,
+#  so no Tk call ever happens from the worker thread.
 # ═══════════════════════════════════════════════════════════════════════════
 class TranslationWorker(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True)
-        self._queue = queue.Queue()
+        self._requests = queue.Queue()
+        self._results = queue.Queue()
         self._stop_event = threading.Event()
         self._ready = threading.Event()
+        self._fatal_error = None
         self._playwright = None
         self._browser = None
         self._page = None
 
+    # ── public API (called from the GUI thread) ─────────────────────────
     def translate(self, text: str, target_lang: str, callback):
-        self._queue.put((text, target_lang, callback))
+        self._requests.put((text, target_lang, callback))
+
+    def poll_results(self):
+        """Drain finished jobs: list of (callback, result, success)."""
+        done = []
+        while True:
+            try:
+                done.append(self._results.get_nowait())
+            except queue.Empty:
+                return done
 
     def wait_ready(self, timeout=0.5) -> bool:
         return self._ready.wait(timeout=timeout)
 
-    def stop(self, timeout=8.0):
+    def fatal_error(self):
+        """Fatal worker error (startup failure or mid-run crash), if any."""
+        return self._fatal_error
+
+    def stop(self, timeout=2.0):
+        """Ask the worker to shut down. Blocking is bounded so the window
+        closes promptly; browser cleanup happens in run()'s finally."""
         self._stop_event.set()
         self.join(timeout=timeout)
-        self._cleanup()
 
+    # ── worker thread ───────────────────────────────────────────────────
     def run(self):
         try:
-            self._init_browser()
+            try:
+                self._init_browser()
+            except Exception as e:
+                # Never pretend we are ready if the browser could not start.
+                self._fatal_error = e
+                self._ready.set()
+                return
             self._ready.set()
-            while not self._stop_event.is_set():
-                try:
-                    text, target_lang, callback = self._queue.get(timeout=0.5)
-                except queue.Empty:
-                    continue
-                try:
-                    result = self._do_translate(text, target_lang)
-                    callback(result, True)
-                except Exception as e:
-                    callback(str(e), False)
-        except Exception:
-            self._ready.set()
+
+            try:
+                while not self._stop_event.is_set():
+                    try:
+                        text, target_lang, callback = self._requests.get(timeout=0.5)
+                    except queue.Empty:
+                        continue
+                    try:
+                        result = self._do_translate(text, target_lang)
+                        self._results.put((callback, result, True))
+                    except Exception as e:
+                        self._results.put((callback, str(e), False))
+            except Exception as e:
+                # A crash outside the per-request guards: tell the UI instead
+                # of dying silently with the app stuck on "Ready" forever.
+                self._fatal_error = e
         finally:
             self._cleanup()
 
     def _init_browser(self):
-        user_data_dir = os.path.join(os.path.expanduser("~"), ".sonic_translator", "browser_data")
+        user_data_dir = get_user_data_dir()
         os.makedirs(user_data_dir, exist_ok=True)
-
-        args = [
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--window-size=1280,800",
-            "--window-position=-10000,-10000",
-            "--disable-background-networking",
-            "--disable-background-timer-throttling",
-            "--disable-renderer-backgrounding",
-            "--disable-features=IsolateOrigins,site-per-process",
-            "--disable-site-isolation-trials",
-            "--disable-web-security",
-            "--disable-infobars",
-            "--disable-extensions",
-            "--disable-plugins",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--password-store=basic",
-            "--use-mock-keychain",
-            "--lang=en-US",
-        ]
 
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,
-            headless=False,
-            args=args,
-            viewport={"width": 1280, "height": 800},
-            locale="en-US",
-            timezone_id="America/New_York",
-            java_script_enabled=True,
-            bypass_csp=True,
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-            ),
+            **get_browser_kwargs(),
         )
         self._page = self._browser.new_page()
-        self._page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            Object.defineProperty(navigator, 'plugins', {get: () => [
-                {name: 'Chrome PDF Plugin'}, {name: 'Chrome PDF Viewer'},
-                {name: 'Native Client'}, {name: 'Widevine Content Decryption Module'}
-            ]});
-            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-            window.chrome = { runtime: {} };
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications'
-                    ? Promise.resolve({ state: Notification.permission })
-                    : originalQuery(parameters)
-            );
-            Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 0});
-            Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
-            Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
-            const getParameter = WebGLRenderingContext.prototype.getParameter;
-            WebGLRenderingContext.prototype.getParameter = function(parameter) {
-                if (parameter === 37445) return 'Intel Inc.';
-                if (parameter === 37446) return 'Intel Iris Xe Graphics';
-                return getParameter(parameter);
-            };
-        """)
-        self._page.goto("https://duck.ai", wait_until="domcontentloaded", timeout=45000)
-        self._page.wait_for_timeout(3500)
-        self._dismiss_banners()
+        self._page.add_init_script(get_stealth_init_script())
+        self._page.goto(DUCK_AI_URL, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
+        self._page.wait_for_timeout(INITIAL_SETTLE_MS)
+        dismiss_banners(self._page)
 
     def _cleanup(self):
         for obj in (self._page, self._browser):
@@ -249,84 +178,25 @@ class TranslationWorker(threading.Thread):
         except Exception:
             pass
 
-    def _dismiss_banners(self):
-        for btn_text in ["Continuer", "Continue", "Accept", "Agree", "OK", "Got it", "I Agree"]:
-            try:
-                btn = self._page.locator(f'button:has-text("{btn_text}")').first
-                if btn.is_visible(timeout=1500):
-                    btn.click()
-                    self._page.wait_for_timeout(800)
-            except Exception:
-                continue
-
-    def _clear_chat(self) -> bool:
-        for sel in ['button:has-text("New Chat")', 'button[aria-label="New Chat"]',
-                    'button:has-text("Clear conversation")']:
-            try:
-                btn = self._page.locator(sel).first
-                if btn.is_visible(timeout=1500):
-                    btn.click()
-                    self._page.wait_for_timeout(1000)
-                    return True
-            except Exception:
-                continue
-        return False
-
     def _do_translate(self, text: str, target_lang: str) -> str:
         prompt = build_prompt(text, target_lang)
 
-        if not self._clear_chat():
-            self._page.reload(wait_until="domcontentloaded", timeout=45000)
-            self._page.wait_for_timeout(2500)
-            self._dismiss_banners()
-
-        textarea = self._page.locator("textarea").first
-        textarea.click()
-        textarea.fill(prompt)
-        self._page.wait_for_timeout(400)
-
-        submit = self._page.locator('button[type="submit"]').first
-        submitted = False
-        try:
-            submit.wait_for(state="visible", timeout=5000)
-            if submit.is_enabled():
-                submit.click()
-                submitted = True
-        except Exception:
-            submitted = False
-        if not submitted:
+        # Reuse the open page: reset the conversation, or reload as fallback.
+        if not clear_chat(self._page):
             try:
-                textarea.press("Enter")
+                self._page.reload(wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
             except Exception:
                 pass
+            self._page.wait_for_timeout(2500)
+            dismiss_banners(self._page)
 
-        self._page.wait_for_selector('div[data-activeresponse="true"]', timeout=30000)
+        fill_and_submit(self._page, prompt)
 
-        last_text = ""
-        stable_ticks = 0
-        response_text = ""
-        for _ in range(90):
-            self._page.wait_for_timeout(500)
-            try:
-                count = self._page.locator('div[data-activeresponse="true"]').count()
-                if count == 0:
-                    continue
-                container = self._page.locator('div[data-activeresponse="true"]').nth(count - 1)
-                current = container.inner_text().strip()
-                if current and current != prompt:
-                    if current == last_text and len(current) > 3:
-                        stable_ticks += 1
-                        if stable_ticks >= 2:
-                            response_text = current
-                            break
-                    else:
-                        stable_ticks = 0
-                    last_text = current
-            except Exception:
-                continue
-
-        if not response_text:
-            raise RuntimeError("No stable response from Duck.ai in time.")
+        try:
+            response_text = wait_for_response(self._page, prompt)
+        except RuntimeError:
+            dump_debug_info(self._page)
+            raise
 
         clean = clean_translation(response_text, text)
         if not clean:
@@ -357,6 +227,7 @@ class SonicTranslatorApp(ctk.CTk):
         self._worker.start()
         self._set_status("Starting…", COLOR["text_muted"])
         self.after(200, self._poll_ready)
+        self.after(100, self._poll_results)
 
     # ── layout ───────────────────────────────────────────────────────────
     def _build_layout(self):
@@ -495,12 +366,34 @@ class SonicTranslatorApp(ctk.CTk):
             font=(FONT_FAMILY, 12),
         )
 
-    # ── worker readiness ─────────────────────────────────────────────────
+    # ── worker readiness / results ──────────────────────────────────────
     def _poll_ready(self):
         if self._worker.wait_ready(timeout=0.3):
-            self._set_status("Ready", COLOR["text_muted"])
+            err = self._worker.fatal_error()
+            if err is not None:
+                self._set_status("Startup failed", COLOR["danger"])
+                self._set_output_text(
+                    f"Could not start the translation engine.\n\n{err}"
+                )
+                self.translate_btn.configure(state="disabled")
+            else:
+                self._set_status("Ready", COLOR["text_muted"])
         else:
             self.after(200, self._poll_ready)
+
+    def _poll_results(self):
+        # Runs on the main thread, so callbacks may touch Tk freely.
+        for callback, result, success in self._worker.poll_results():
+            callback(result, success)
+        # If the worker died after startup (ready was set), stop pretending
+        # everything is fine: surface the error and disable the button.
+        if (self._worker.fatal_error() is not None
+                and not self._worker.is_alive()
+                and self._worker.wait_ready(timeout=0)):
+            self._set_status("Engine stopped", COLOR["danger"])
+            self.translate_btn.configure(state="disabled")
+            return
+        self.after(100, self._poll_results)
 
     # ── actions ──────────────────────────────────────────────────────────
     def _set_status(self, text, color):
@@ -535,13 +428,12 @@ class SonicTranslatorApp(ctk.CTk):
             return
 
         target_name = self.lang_var.get()
-        target_code = NAME_TO_CODE.get(target_name, "en")
 
         self._is_busy = True
         self._set_busy_ui(True)
 
         def callback(result, success):
-            self.after(0, lambda: self._on_done(result, success))
+            self._on_done(result, success)
 
         self._worker.translate(text, target_name, callback)
 
@@ -578,7 +470,7 @@ class SonicTranslatorApp(ctk.CTk):
             self._set_status("Error", COLOR["danger"])
 
     def _on_closing(self):
-        self._worker.stop(timeout=8)
+        self._worker.stop(timeout=2)
         self.destroy()
 
 
